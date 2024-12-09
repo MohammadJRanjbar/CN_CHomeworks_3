@@ -1,14 +1,17 @@
 #include <iostream>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <vector>
-#include <map>
-#include <set>
-#include "Router.h" // فرض می‌کنیم کلاس روتر و دیگر اجزاء تعریف شده‌اند
-#include "AS.h"     // کلاس Autonomous System
-#include "DHCPServer.h" // برای مدیریت DHCP
-#include "ConfigParser.h" // برای خواندن فایل کانفیگ
+#include <QString>
+#include "EventsCoordinator.h"
+#include "DataGenerator.h"
+#include "MACAddressGenerator.h"
+#include "Packet.h"
 
+// استفاده از فضای نام json
+using json = nlohmann::json;
 
-
+// ساختار داده برای تعریف سیستم‌های مستقل (AS)
 struct AutonomousSystem {
     int id;
     std::string topology_type;
@@ -17,76 +20,77 @@ struct AutonomousSystem {
     std::vector<int> user_gateways;
     int dhcp_server;
     std::vector<int> broken_routers;
-    std::vector<std::pair<int, std::vector<int>>> gateways;
-    std::vector<std::pair<int, std::vector<std::pair<int, int>>>> connections_to_other_as;
+    // سایر جزئیات ...
 };
 
-// تابع ساخت AS و روترها
-void initializeNetwork(const std::vector<AutonomousSystem>& systems) {
-    for (const auto& as : systems) {
-        std::cout << "Initializing AS ID: " << as.id << "\n";
-        // ساخت نودها
-        std::vector<Router> routers;
-        for (int i = 0; i < as.node_count; ++i) {
-            routers.emplace_back(Router(i));
-        }
-
-        // مدیریت روترهای خراب
-        for (int broken_router : as.broken_routers) {
-            if (broken_router < routers.size()) {
-                routers[broken_router].setStatus(false); // خاموش کردن
-            }
-        }
-
-        // تنظیم DHCP Server
-        if (as.dhcp_server < routers.size()) {
-            routers[as.dhcp_server].enableDHCP();
-        }
-
-        // تنظیم Gateway‌ها
-        for (const auto& gateway : as.gateways) {
-            int node_id = gateway.first;
-            if (node_id < routers.size()) {
-                for (int user : gateway.second) {
-                    routers[node_id].addUser(user);
-                }
-            }
-        }
-
-        // ایجاد ارتباطات درون AS
-        if (as.topology_type == "Mesh") {
-            for (size_t i = 0; i < routers.size(); ++i) {
-                for (size_t j = i + 1; j < routers.size(); ++j) {
-                    routers[i].connectTo(routers[j]);
-                }
-            }
-        } else if (as.topology_type == "RingStar") {
-            for (size_t i = 0; i < routers.size(); ++i) {
-                routers[i].connectTo(routers[(i + 1) % routers.size()]);
-            }
-        }
-
-        // مدیریت ارتباطات بین AS‌ها
-        for (const auto& connection : as.connections_to_other_as) {
-            int target_as_id = connection.first;
-            for (const auto& gateway_pair : connection.second) {
-                int local_gateway = gateway_pair.first;
-                int remote_gateway = gateway_pair.second;
-                std::cout << "Connecting AS " << as.id << " gateway " << local_gateway
-                          << " to AS " << target_as_id << " gateway " << remote_gateway << "\n";
-            }
-        }
+// توابع کمکی
+void parseConfig(const std::string &filePath, json &config) {
+    std::ifstream file(filePath);
+    if (!file.is_open()) {
+        throw std::runtime_error("Unable to open config file: " + filePath);
     }
+    file >> config;
 }
 
-int main() {
-    // فایل کانفیگ را بخوانید
-    ConfigParser config("config.json");
-    auto systems = config.parseAS();
+void createAutonomousSystem(const json &asConfig) {
+    AutonomousSystem as;
+    as.id = asConfig["id"];
+    as.topology_type = asConfig["topology_type"];
+    as.node_count = asConfig["node_count"];
+    for (const auto &gateway : asConfig["as_gateways"]) {
+        as.as_gateways.push_back(gateway);
+    }
+    for (const auto &user_gateway : asConfig["user_gateways"]) {
+        as.user_gateways.push_back(user_gateway);
+    }
+    as.dhcp_server = asConfig["dhcp_server"];
+    for (const auto &broken_router : asConfig["broken_routers"]) {
+        as.broken_routers.push_back(broken_router);
+    }
+    std::cout << "Autonomous System " << as.id << " created.\n";
+}
 
-    // شبکه را مقداردهی کنید
-    initializeNetwork(systems);
+int main(int argc, char *argv[]) {
+    QCoreApplication app(argc, argv);
 
-    std::cout << "Network initialized. All routers are off.\n";
-    return 0;
+    try {
+        // خواندن فایل پیکربندی
+        std::string configPath = "config.json";
+        json config;
+        parseConfig(configPath, config);
+
+        // تنظیمات اولیه
+        int simulationDuration = std::stoi(config["simulation_duration"]);
+        int cycleDuration = std::stoi(config["cycle_duration"]);
+        int ttl = config["TTL"];
+
+        std::cout << "Simulation Duration: " << simulationDuration << " ms\n";
+        std::cout << "Cycle Duration: " << cycleDuration << " ms\n";
+        std::cout << "TTL: " << ttl << "\n";
+
+        // ایجاد سیستم‌های مستقل (AS)
+        for (const auto &asConfig : config["Autonomous_systems"]) {
+            createAutonomousSystem(asConfig);
+        }
+
+        // ایجاد و اتصال مولد داده‌ها
+        EventsCoordinator *coordinator = EventsCoordinator::instance();
+        DataGenerator dataGenerator;
+        dataGenerator.setDistribution(config["statistical_distribution"]);
+
+        QObject::connect(coordinator, &EventsCoordinator::cycleTriggered,
+                         &dataGenerator, &DataGenerator::onCycleTriggered);
+
+        QObject::connect(&dataGenerator, &DataGenerator::packetGenerated, [](const Packet &packet) {
+            std::cout << "Packet Generated: ID " << packet.getId() << "\n";
+        });
+
+        // شروع شبیه‌سازی
+        coordinator->start();
+        return app.exec();
+
+    } catch (const std::exception &ex) {
+        std::cerr << "Error: " << ex.what() << std::endl;
+        return -1;
+    }
 }
